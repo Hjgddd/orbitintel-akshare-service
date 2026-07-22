@@ -1,4 +1,4 @@
-"""OrbitIntel server-side AKShare adapter.
+�r�^�f��ئ{]ly�'vî���"""OrbitIntel server-side AKShare adapter.
 
 AKShare is a Python library, while the public OrbitIntel site runs on a
 Cloudflare-compatible TypeScript Worker. This service keeps Python and the
@@ -22,6 +22,19 @@ from fastapi import FastAPI, Header, HTTPException
 app = FastAPI(title="OrbitIntel AKShare Adapter", version="1.0.0")
 SERVICE_KEY = os.getenv("AKSHARE_SERVICE_KEY", "").strip()
 _CACHE: Dict[str, Tuple[float, Any]] = {}
+
+INDEX_SPECS = {
+    "000001": {"name": "\u4e0a\u8bc1\u6307\u6570", "symbol": "sh000001"},
+    "399001": {"name": "\u6df1\u8bc1\u6210\u6307", "symbol": "sz399001"},
+    "399006": {"name": "\u521b\u4e1a\u677f\u6307", "symbol": "sz399006"},
+}
+
+KNOWN_SECURITY_NAMES = {
+    "000001": "\u4e0a\u8bc1\u6307\u6570",
+    "300750": "\u5b81\u5fb7\u65f6\u4ee3",
+    "600519": "\u8d35\u5dde\u8305\u53f0",
+    "688981": "\u4e2d\u82af\u56fd\u9645",
+}
 
 
 def now_iso() -> str:
@@ -95,33 +108,117 @@ def number(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def quote_row(code: str) -> Dict[str, Any]:
-    frame = cached("a-spot", 8, lambda: ak.stock_zh_a_spot_em())
-    rows = records(frame)
-    row = next((item for item in rows if str(pick(item, "代码", "code", default="")).zfill(6) == code), None)
-    if not row:
-        raise HTTPException(status_code=404, detail=f"quote not found for {code}")
+def history_rows(symbol: str, period: str = "daily", lookback_days: int = 730) -> List[Dict[str, Any]]:
+    today = datetime.now().date()
+    start = (today - timedelta(days=lookback_days)).strftime("%Y%m%d")
+    end = (today + timedelta(days=1)).strftime("%Y%m%d")
+    frame = cached(
+        f"hist-{symbol}-{period}",
+        60,
+        lambda: ak.stock_zh_a_hist(symbol=symbol, period=period, start_date=start, end_date=end, adjust="qfq"),
+    )
+    return records(frame)
+
+
+def history_quote(code: str) -> Dict[str, Any]:
+    rows = history_rows(code)
+    if not rows:
+        raise HTTPException(status_code=503, detail=f"no reliable historical quote for {code}")
+    row = rows[-1]
+    previous = rows[-2] if len(rows) > 1 else row
+    price = number(pick(row, "\u6536\u76d8", "close"))
+    previous_close = number(pick(previous, "\u6536\u76d8", "close"), price)
+    change = price - previous_close
+    change_pct = change / previous_close * 100 if previous_close else 0.0
+    as_of = str(pick(row, "\u65e5\u671f", "date", default=""))
     return {
         "code": code,
-        "name": str(pick(row, "名称", "name", default=code)),
-        "price": number(pick(row, "最新价", "price")),
-        "change": number(pick(row, "涨跌额", "change")),
-        "changePct": number(pick(row, "涨跌幅", "changePct")),
-        "open": number(pick(row, "今开", "open")),
-        "high": number(pick(row, "最高", "high")),
-        "low": number(pick(row, "最低", "low")),
-        "previousClose": number(pick(row, "昨收", "previousClose")),
-        "volume": number(pick(row, "成交量", "volume")),
-        "amount": number(pick(row, "成交额", "amount")),
-        "turnover": number(pick(row, "换手率", "turnover")),
-        "marketCap": number(pick(row, "总市值", "marketCap")),
+        "name": KNOWN_SECURITY_NAMES.get(code, code),
+        "price": price,
+        "change": change,
+        "changePct": change_pct,
+        "open": number(pick(row, "\u5f00\u76d8", "open")),
+        "high": number(pick(row, "\u6700\u9ad8", "high")),
+        "low": number(pick(row, "\u6700\u4f4e", "low")),
+        "previousClose": previous_close,
+        "volume": number(pick(row, "\u6210\u4ea4\u91cf", "volume")),
+        "amount": number(pick(row, "\u6210\u4ea4\u989d", "amount")),
+        "turnover": 0.0,
+        "marketCap": 0.0,
         "timestamp": now_iso(),
+        "exchangeTimestamp": as_of,
+        "source": "AKShare / stock_zh_a_hist",
+        "dataLevel": "daily-close",
+        "isDelayed": True,
+        "isEstimated": False,
+        "isDemo": False,
+        "notice": "\u514d\u8d39\u6570\u636e\u6e90\u6682\u672a\u63d0\u4f9b\u53ef\u9760\u5b9e\u65f6\u5feb\u7167\uff0c\u5f53\u524d\u663e\u793a\u6700\u8fd1\u4ea4\u6613\u65e5\u6536\u76d8\u6570\u636e\u3002",
     }
 
 
+def quote_row(code: str) -> Dict[str, Any]:
+    try:
+        frame = cached("a-spot", 8, lambda: ak.stock_zh_a_spot_em())
+        rows = records(frame)
+        row = next((item for item in rows if str(pick(item, "\u4ee3\u7801", "code", default="")).zfill(6) == code), None)
+        if row:
+            return {
+                "code": code,
+                "name": str(pick(row, "\u540d\u79f0", "name", default=code)),
+                "price": number(pick(row, "\u6700\u65b0\u4ef7", "price")),
+                "change": number(pick(row, "\u6da8\u8dcc\u989d", "change")),
+                "changePct": number(pick(row, "\u6da8\u8dcc\u5e45", "changePct")),
+                "open": number(pick(row, "\u4eca\u5f00", "open")),
+                "high": number(pick(row, "\u6700\u9ad8", "high")),
+                "low": number(pick(row, "\u6700\u4f4e", "low")),
+                "previousClose": number(pick(row, "\u6628\u6536", "previousClose")),
+                "volume": number(pick(row, "\u6210\u4ea4\u91cf", "volume")),
+                "amount": number(pick(row, "\u6210\u4ea4\u989d", "amount")),
+                "turnover": number(pick(row, "\u6362\u624b\u7387", "turnover")),
+                "marketCap": number(pick(row, "\u603b\u5e02\u503c", "marketCap")),
+                "timestamp": now_iso(),
+                "source": "AKShare / stock_zh_a_spot_em",
+                "dataLevel": "snapshot",
+                "isDelayed": False,
+                "isEstimated": False,
+                "isDemo": False,
+            }
+    except Exception:
+        pass
+    return history_quote(code)
+
+
 def index_rows() -> List[Dict[str, Any]]:
-    frame = cached("important-index-spot", 12, lambda: ak.stock_zh_index_spot_em(symbol="沪深重要指数"))
-    return records(frame)
+    try:
+        frame = cached("important-index-spot", 12, lambda: ak.stock_zh_index_spot_em(symbol="\u6caa\u6df1\u91cd\u8981\u6307\u6570"))
+        rows = records(frame)
+        if rows:
+            return rows
+    except Exception:
+        pass
+
+    fallback: List[Dict[str, Any]] = []
+    for code, spec in INDEX_SPECS.items():
+        try:
+            frame = cached(f"index-hist-{code}", 60, lambda spec=spec: ak.stock_zh_index_daily_em(symbol=spec["symbol"]))
+            rows = records(frame)
+            if not rows:
+                continue
+            row = rows[-1]
+            previous = rows[-2] if len(rows) > 1 else row
+            value = number(pick(row, "\u6536\u76d8", "close"))
+            previous_value = number(pick(previous, "\u6536\u76d8", "close"), value)
+            change_pct = (value - previous_value) / previous_value * 100 if previous_value else 0.0
+            fallback.append({
+                "\u4ee3\u7801": code,
+                "\u540d\u79f0": spec["name"],
+                "\u6700\u65b0\u4ef7": value,
+                "\u6da8\u8dcc\u5e45": change_pct,
+                "\u65e5\u671f": pick(row, "\u65e5\u671f", "date", default=""),
+            })
+        except Exception:
+            continue
+    return fallback
 
 
 @app.get("/health")
@@ -139,28 +236,43 @@ def quote(code: str, x_akshare_key: Optional[str] = Header(default=None)) -> Dic
 @app.get("/v1/market")
 def market(x_akshare_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_key(x_akshare_key)
-    wanted = {"000001": "上证指数", "399001": "深证成指", "399006": "创业板指"}
+    wanted = {"000001": "\u4e0a\u8bc1\u6307\u6570", "399001": "\u6df1\u8bc1\u6210\u6307", "399006": "\u521b\u4e1a\u677f\u6307"}
     rows = []
-    breadth = cached("a-spot", 8, lambda: records(ak.stock_zh_a_spot_em()))
-    up = sum(1 for item in breadth if number(pick(item, "涨跌幅", "changePct")) > 0)
-    down = sum(1 for item in breadth if number(pick(item, "涨跌幅", "changePct")) < 0)
-    flat = max(len(breadth) - up - down, 0)
+    breadth_status = "unavailable"
+    up = down = flat = 0
+    try:
+        breadth = cached("a-spot", 8, lambda: records(ak.stock_zh_a_spot_em()))
+        up = sum(1 for item in breadth if number(pick(item, "\u6da8\u8dcc\u5e45", "changePct")) > 0)
+        down = sum(1 for item in breadth if number(pick(item, "\u6da8\u8dcc\u5e45", "changePct")) < 0)
+        flat = max(len(breadth) - up - down, 0)
+        breadth_status = "available"
+    except Exception:
+        pass
     for row in index_rows():
-        code = str(pick(row, "代码", "code", default="")).zfill(6)
+        code = str(pick(row, "\u4ee3\u7801", "code", default="")).zfill(6)
         if code not in wanted:
             continue
         rows.append({
             "code": code,
-            "name": str(pick(row, "名称", "name", default=wanted[code])),
-            "value": number(pick(row, "最新价", "value", "price")),
-            "change": number(pick(row, "涨跌幅", "changePct")),
+            "name": str(pick(row, "\u540d\u79f0", "name", default=wanted[code])),
+            "value": number(pick(row, "\u6700\u65b0\u4ef7", "value", "price")),
+            "change": number(pick(row, "\u6da8\u8dcc\u5e45", "changePct")),
             "up": up,
             "down": down,
             "flat": flat,
         })
     if not rows:
         raise HTTPException(status_code=502, detail="AKShare returned no important index quotes")
-    return {"data": {"quotes": rows, "timestamp": now_iso()}}
+    return {
+        "data": {
+            "quotes": rows,
+            "timestamp": now_iso(),
+            "breadthStatus": breadth_status,
+            "breadthNotice": "\u514d\u8d39\u6e90\u672a\u8fd4\u56de\u53ef\u9760\u7684\u5168\u5e02\u573a\u5feb\u7167\uff0c\u6da8\u8dcc\u5bb6\u6570\u4e0d\u5c55\u793a\u4f30\u7b97\u503c\u3002" if breadth_status != "available" else None,
+            "source": "AKShare",
+            "dataLevel": "daily-close-fallback" if breadth_status != "available" else "snapshot",
+        }
+    }
 
 
 @app.get("/v1/bars")
@@ -175,13 +287,13 @@ def bars(code: str, period: str = "1d", x_akshare_key: Optional[str] = Header(de
         frame = cached(f"hist-{symbol}-{period}", 60, lambda: ak.stock_zh_a_hist(symbol=symbol, period=period_name, start_date=start, end_date=end, adjust="qfq"))
         raw = records(frame)
         normalized = [{
-            "time": str(pick(row, "日期", "date", default="")),
-            "open": number(pick(row, "开盘", "open")),
-            "high": number(pick(row, "最高", "high")),
-            "low": number(pick(row, "最低", "low")),
-            "close": number(pick(row, "收盘", "close")),
-            "volume": number(pick(row, "成交量", "volume")),
-            "amount": number(pick(row, "成交额", "amount")),
+            "time": str(pick(row, "\u65e5\u671f", "date", default="")),
+            "open": number(pick(row, "\u5f00\u76d8", "open")),
+            "high": number(pick(row, "\u6700\u9ad8", "high")),
+            "low": number(pick(row, "\u6700\u4f4e", "low")),
+            "close": number(pick(row, "\u6536\u76d8", "close")),
+            "volume": number(pick(row, "\u6210\u4ea4\u91cf", "volume")),
+            "amount": number(pick(row, "\u6210\u4ea4\u989d", "amount")),
         } for row in raw]
     else:
         minute_period = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "60m": "60"}.get(period, "5")
@@ -190,13 +302,13 @@ def bars(code: str, period: str = "1d", x_akshare_key: Optional[str] = Header(de
         frame = cached(f"minute-{symbol}-{minute_period}", 20, lambda: ak.stock_zh_a_hist_min_em(symbol=symbol, start_date=start, end_date=end, period=minute_period, adjust=""))
         raw = records(frame)
         normalized = [{
-            "time": str(pick(row, "时间", "day", "timestamp", default="")),
-            "open": number(pick(row, "开盘", "open")),
-            "high": number(pick(row, "最高", "high")),
-            "low": number(pick(row, "最低", "low")),
-            "close": number(pick(row, "收盘", "close")),
-            "volume": number(pick(row, "成交量", "volume")),
-            "amount": number(pick(row, "成交额", "amount")),
+            "time": str(pick(row, "\u65f6\u95f4", "day", "timestamp", default="")),
+            "open": number(pick(row, "\u5f00\u76d8", "open")),
+            "high": number(pick(row, "\u6700\u9ad8", "high")),
+            "low": number(pick(row, "\u6700\u4f4e", "low")),
+            "close": number(pick(row, "\u6536\u76d8", "close")),
+            "volume": number(pick(row, "\u6210\u4ea4\u91cf", "volume")),
+            "amount": number(pick(row, "\u6210\u4ea4\u989d", "amount")),
         } for row in raw]
     normalized = [row for row in normalized if row["time"] and row["close"] > 0]
     if not normalized:
@@ -212,8 +324,8 @@ def orderbook(code: str, x_akshare_key: Optional[str] = Header(default=None)) ->
     raw = records(frame)
     levels: Dict[str, float] = {}
     for row in raw:
-        item = str(pick(row, "item", "名称", default=""))
-        levels[item] = number(pick(row, "value", "值", default=0))
+        item = str(pick(row, "item", "\u540d\u79f0", default=""))
+        levels[item] = number(pick(row, "value", "\u503c", default=0))
     bids = [{"price": levels.get(f"buy_{level}", 0), "volume": levels.get(f"buy_{level}_vol", 0)} for level in range(1, 6)]
     asks = [{"price": levels.get(f"sell_{level}", 0), "volume": levels.get(f"sell_{level}_vol", 0)} for level in range(1, 6)]
     bids = [row for row in bids if row["price"] > 0]
@@ -232,13 +344,13 @@ def flow(code: str, x_akshare_key: Optional[str] = Header(default=None)) -> Dict
     if not raw:
         raise HTTPException(status_code=404, detail=f"no money flow for {symbol}")
     row = raw[-1]
-    main = number(pick(row, "主力净流入-净额", "主力净流入", "netAmount"))
-    large = number(pick(row, "大单净流入-净额", "largeNet"))
-    medium = number(pick(row, "中单净流入-净额", "mediumNet"))
-    small = number(pick(row, "小单净流入-净额", "smallNet"))
+    main = number(pick(row, "\u4e3b\u529b\u51c0\u6d41\u5165-\u51c0\u989d", "\u4e3b\u529b\u51c0\u6d41\u5165", "netAmount"))
+    large = number(pick(row, "\u5927\u5355\u51c0\u6d41\u5165-\u51c0\u989d", "largeNet"))
+    medium = number(pick(row, "\u4e2d\u5355\u51c0\u6d41\u5165-\u51c0\u989d", "mediumNet"))
+    small = number(pick(row, "\u5c0f\u5355\u51c0\u6d41\u5165-\u51c0\u989d", "smallNet"))
     return {"data": {"flow": {
         "code": symbol,
-        "tradeDate": str(pick(row, "日期", "tradeDate", default="")),
+        "tradeDate": str(pick(row, "\u65e5\u671f", "tradeDate", default="")),
         "netAmount": main,
         "largeBuyAmount": max(large, 0),
         "largeSellAmount": max(-large, 0),
@@ -252,28 +364,28 @@ def flow(code: str, x_akshare_key: Optional[str] = Header(default=None)) -> Dict
 @app.get("/v1/news")
 def news(code: Optional[str] = None, x_akshare_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_key(x_akshare_key)
-    symbol = clean_code(code) if code else "市场"
+    symbol = clean_code(code) if code else "\u5e02\u573a"
     if code:
         frame = cached(f"news-{symbol}", 60, lambda: ak.stock_news_em(symbol=symbol))
         raw = records(frame)
         normalized = [{
             "id": f"akshare-{symbol}-{index}",
-            "title": str(pick(row, "新闻标题", "title", default="")),
-            "content": str(pick(row, "新闻内容", "content", default="")),
-            "source": str(pick(row, "文章来源", "source", default="东方财富")),
-            "publishedAt": str(pick(row, "发布时间", "publishedAt", default=now_iso())),
-            "url": str(pick(row, "新闻链接", "url", default="")),
+            "title": str(pick(row, "\u65b0\u95fb\u6807\u9898", "title", default="")),
+            "content": str(pick(row, "\u65b0\u95fb\u5185\u5bb9", "content", default="")),
+            "source": str(pick(row, "\u6587\u7ae0\u6765\u6e90", "source", default="\u4e1c\u65b9\u8d22\u5bcc")),
+            "publishedAt": str(pick(row, "\u53d1\u5e03\u65f6\u95f4", "publishedAt", default=now_iso())),
+            "url": str(pick(row, "\u65b0\u95fb\u94fe\u63a5", "url", default="")),
         } for index, row in enumerate(raw)]
     else:
         frame = cached("market-news", 60, lambda: ak.stock_news_main_cx())
         raw = records(frame)
         normalized = [{
             "id": f"akshare-market-{index}",
-            "title": str(pick(row, "summary", "标题", "title", default="")),
-            "content": str(pick(row, "summary", "内容", "content", default="")),
-            "source": "财新数据通",
+            "title": str(pick(row, "summary", "\u6807\u9898", "title", default="")),
+            "content": str(pick(row, "summary", "\u5185\u5bb9", "content", default="")),
+            "source": "\u8d22\u65b0\u6570\u636e\u901a",
             "publishedAt": now_iso(),
-            "url": str(pick(row, "url", "链接", default="")),
+            "url": str(pick(row, "url", "\u94fe\u63a5", default="")),
         } for index, row in enumerate(raw)]
     normalized = [row for row in normalized if row["title"]]
     return {"data": {"news": normalized[:100], "timestamp": now_iso()}}
