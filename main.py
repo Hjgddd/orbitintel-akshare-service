@@ -122,14 +122,21 @@ def yahoo_symbol(code: str) -> str:
 def yahoo_history_rows(code: str, period: str = "daily", ticker: Optional[str] = None) -> List[Dict[str, Any]]:
     interval = {"daily": "1d", "weekly": "1wk", "monthly": "1mo"}.get(period, "1d")
     chart_range = {"daily": "2y", "weekly": "10y", "monthly": "10y"}.get(period, "2y")
-    response = requests.get(
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker or yahoo_symbol(code)}",
-        params={"range": chart_range, "interval": interval, "events": "div,splits"},
-        headers={"User-Agent": "OrbitIntel/1.0"},
-        timeout=15,
-    )
-    response.raise_for_status()
-    result = (response.json().get("chart") or {}).get("result") or []
+    result: List[Dict[str, Any]] = []
+    for host in ("query2.finance.yahoo.com", "query1.finance.yahoo.com"):
+        try:
+            response = requests.get(
+                f"https://{host}/v8/finance/chart/{ticker or yahoo_symbol(code)}",
+                params={"range": chart_range, "interval": interval, "events": "div,splits"},
+                headers={"User-Agent": "Mozilla/5.0 OrbitIntel/1.0"},
+                timeout=15,
+            )
+            if response.ok:
+                result = (response.json().get("chart") or {}).get("result") or []
+                if result:
+                    break
+        except Exception:
+            continue
     if not result:
         return []
     payload = result[0]
