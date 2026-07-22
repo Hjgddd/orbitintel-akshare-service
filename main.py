@@ -1,4 +1,4 @@
-�r�^�f��ئ{]ly�'vî���"""OrbitIntel server-side AKShare adapter.
+"""OrbitIntel server-side AKShare adapter.
 
 AKShare is a Python library, while the public OrbitIntel site runs on a
 Cloudflare-compatible TypeScript Worker. This service keeps Python and the
