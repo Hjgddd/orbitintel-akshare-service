@@ -290,6 +290,7 @@ def index_rows() -> List[Dict[str, Any]]:
                 "value": value,
                 "changePct": change_pct,
                 "date": pick(row, "\u65e5\u671f", "date", default=""),
+                "_source": str(row.get("_source") or "Yahoo Finance chart"),
             })
         except Exception:
             continue
@@ -362,14 +363,21 @@ def market(x_akshare_key: Optional[str] = Header(default=None)) -> Dict[str, Any
         })
     if not rows:
         raise HTTPException(status_code=502, detail="AKShare returned no important index quotes")
+    fallback_source = next((str(row.get("_source")) for row in rows if row.get("_source")), None)
+    source = fallback_source or "AKShare"
+    is_fallback = bool(fallback_source) or breadth_status != "available"
     return {
         "data": {
             "quotes": rows,
             "timestamp": now_iso(),
             "breadthStatus": breadth_status,
             "breadthNotice": "\u514d\u8d39\u6e90\u672a\u8fd4\u56de\u53ef\u9760\u7684\u5168\u5e02\u573a\u5feb\u7167\uff0c\u6da8\u8dcc\u5bb6\u6570\u4e0d\u5c55\u793a\u4f30\u7b97\u503c\u3002" if breadth_status != "available" else None,
-            "source": "AKShare",
-            "dataLevel": "daily-close-fallback" if breadth_status != "available" else "snapshot",
+            "source": source,
+            "dataLevel": "daily-close-fallback" if is_fallback else "snapshot",
+            "isDelayed": is_fallback,
+            "isEstimated": False,
+            "isDemo": False,
+            "notice": "\u514d\u8d39\u6570\u636e\u6e90\u6682\u672a\u63d0\u4f9b\u53ef\u9760\u5b9e\u65f6\u5feb\u7167\uff0c\u5f53\u524d\u663e\u793a\u6700\u8fd1\u4ea4\u6613\u65e5\u6536\u76d8\u6570\u636e\u3002" if is_fallback else None,
         }
     }
 
