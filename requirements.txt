@@ -1,0 +1,4 @@
+akshare>=1.18.70,<2
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+pandas>=2.2,<3
