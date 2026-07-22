@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import akshare as ak
 import pandas as pd
+import requests
 from fastapi import FastAPI, Header, HTTPException
 
 
@@ -24,9 +25,9 @@ SERVICE_KEY = os.getenv("AKSHARE_SERVICE_KEY", "").strip()
 _CACHE: Dict[str, Tuple[float, Any]] = {}
 
 INDEX_SPECS = {
-    "000001": {"name": "\u4e0a\u8bc1\u6307\u6570", "symbol": "sh000001"},
-    "399001": {"name": "\u6df1\u8bc1\u6210\u6307", "symbol": "sz399001"},
-    "399006": {"name": "\u521b\u4e1a\u677f\u6307", "symbol": "sz399006"},
+    "000001": {"name": "\u4e0a\u8bc1\u6307\u6570", "symbol": "sh000001", "yahoo": "000001.SS"},
+    "399001": {"name": "\u6df1\u8bc1\u6210\u6307", "symbol": "sz399001", "yahoo": "399001.SZ"},
+    "399006": {"name": "\u521b\u4e1a\u677f\u6307", "symbol": "sz399006", "yahoo": "399006.SZ"},
 }
 
 KNOWN_SECURITY_NAMES = {
@@ -108,16 +109,84 @@ def number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def yahoo_symbol(code: str) -> str:
+    if code == "000001":
+        return "^SSEC"
+    if code == "399001":
+        return "^SZI"
+    if code == "399006":
+        return "399006.SZ"
+    return f"{code}.SS" if code.startswith("6") else f"{code}.SZ"
+
+
+def yahoo_history_rows(code: str, period: str = "daily", ticker: Optional[str] = None) -> List[Dict[str, Any]]:
+    interval = {"daily": "1d", "weekly": "1wk", "monthly": "1mo"}.get(period, "1d")
+    chart_range = {"daily": "2y", "weekly": "10y", "monthly": "10y"}.get(period, "2y")
+    response = requests.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker or yahoo_symbol(code)}",
+        params={"range": chart_range, "interval": interval, "events": "div,splits"},
+        headers={"User-Agent": "OrbitIntel/1.0"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    result = (response.json().get("chart") or {}).get("result") or []
+    if not result:
+        return []
+    payload = result[0]
+    timestamps = payload.get("timestamp") or []
+    quote = ((payload.get("indicators") or {}).get("quote") or [{}])[0]
+    adjusted = (((payload.get("indicators") or {}).get("adjclose") or [{}])[0]).get("adjclose") or []
+    rows: List[Dict[str, Any]] = []
+    for index, stamp in enumerate(timestamps):
+        close_values = quote.get("close") or []
+        close = close_values[index] if index < len(close_values) else None
+        if close is None:
+            continue
+        rows.append({
+            "date": datetime.fromtimestamp(stamp, timezone.utc).date().isoformat(),
+            "open": (quote.get("open") or [None])[index],
+            "high": (quote.get("high") or [None])[index],
+            "low": (quote.get("low") or [None])[index],
+            "close": close,
+            "volume": (quote.get("volume") or [None])[index],
+            "adjustedClose": adjusted[index] if index < len(adjusted) else close,
+            "_source": "Yahoo Finance chart",
+        })
+    return rows
+
+
 def history_rows(symbol: str, period: str = "daily", lookback_days: int = 730) -> List[Dict[str, Any]]:
     today = datetime.now().date()
     start = (today - timedelta(days=lookback_days)).strftime("%Y%m%d")
     end = (today + timedelta(days=1)).strftime("%Y%m%d")
-    frame = cached(
-        f"hist-{symbol}-{period}",
-        60,
-        lambda: ak.stock_zh_a_hist(symbol=symbol, period=period, start_date=start, end_date=end, adjust="qfq"),
-    )
-    return records(frame)
+    try:
+        frame = cached(
+            f"hist-{symbol}-{period}",
+            60,
+            lambda: ak.stock_zh_a_hist(symbol=symbol, period=period, start_date=start, end_date=end, adjust="qfq"),
+        )
+        rows = records(frame)
+        if rows:
+            for row in rows:
+                row["_source"] = "AKShare / stock_zh_a_hist"
+            return rows
+    except Exception:
+        pass
+    return yahoo_history_rows(symbol, period)
+
+
+def index_history_rows(code: str) -> List[Dict[str, Any]]:
+    spec = INDEX_SPECS[code]
+    try:
+        frame = cached(f"index-hist-{code}", 60, lambda: ak.stock_zh_index_daily_em(symbol=spec["symbol"]))
+        rows = records(frame)
+        if rows:
+            for row in rows:
+                row["_source"] = "AKShare / stock_zh_index_daily_em"
+            return rows
+    except Exception:
+        pass
+    return yahoo_history_rows(code, "daily", spec.get("yahoo"))
 
 
 def history_quote(code: str) -> Dict[str, Any]:
@@ -147,7 +216,7 @@ def history_quote(code: str) -> Dict[str, Any]:
         "marketCap": 0.0,
         "timestamp": now_iso(),
         "exchangeTimestamp": as_of,
-        "source": "AKShare / stock_zh_a_hist",
+        "source": str(row.get("_source") or "AKShare / stock_zh_a_hist"),
         "dataLevel": "daily-close",
         "isDelayed": True,
         "isEstimated": False,
@@ -197,6 +266,29 @@ def index_rows() -> List[Dict[str, Any]]:
     except Exception:
         pass
 
+    fallback: List[Dict[str, Any]] = []
+    for code, spec in INDEX_SPECS.items():
+        try:
+            rows = index_history_rows(code)
+            if not rows:
+                continue
+            row = rows[-1]
+            previous = rows[-2] if len(rows) > 1 else row
+            value = number(pick(row, "\u6536\u76d8", "close", "value"))
+            previous_value = number(pick(previous, "\u6536\u76d8", "close", "value"), value)
+            change_pct = (value - previous_value) / previous_value * 100 if previous_value else 0.0
+            fallback.append({
+                "code": code,
+                "name": spec["name"],
+                "value": value,
+                "changePct": change_pct,
+                "date": pick(row, "\u65e5\u671f", "date", default=""),
+            })
+        except Exception:
+            continue
+    return fallback
+
+    # Retained below for source compatibility with the original adapter.
     fallback: List[Dict[str, Any]] = []
     for code, spec in INDEX_SPECS.items():
         try:
@@ -282,10 +374,7 @@ def bars(code: str, period: str = "1d", x_akshare_key: Optional[str] = Header(de
     today = datetime.now().date()
     if period in {"1d", "1w", "1mo"}:
         period_name = {"1d": "daily", "1w": "weekly", "1mo": "monthly"}[period]
-        start = (today - timedelta(days=730 if period == "1d" else 3650)).strftime("%Y%m%d")
-        end = (today + timedelta(days=1)).strftime("%Y%m%d")
-        frame = cached(f"hist-{symbol}-{period}", 60, lambda: ak.stock_zh_a_hist(symbol=symbol, period=period_name, start_date=start, end_date=end, adjust="qfq"))
-        raw = records(frame)
+        raw = history_rows(symbol, period_name, lookback_days=730 if period == "1d" else 3650)
         normalized = [{
             "time": str(pick(row, "\u65e5\u671f", "date", default="")),
             "open": number(pick(row, "\u5f00\u76d8", "open")),
